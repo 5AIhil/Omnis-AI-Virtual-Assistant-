@@ -3,6 +3,14 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta
 import uuid
 import logging
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage
+from agent import create_agent_graph
 
 from models import (
     ChatRequest, ChatResponse, 
@@ -37,6 +45,48 @@ def execute_reminder(reminder_id: str, task: str):
     if reminder_id in active_reminders:
         active_reminders[reminder_id]["status"] = "executed"
 
+# --- Agent Tools Definition ---
+@tool
+def set_reminder_tool(task: str, delay_seconds: int) -> str:
+    """Create and schedule a new reminder. Delay must be greater than 0."""
+    if delay_seconds <= 0:
+        return "Error: Delay must be greater than 0 seconds."
+        
+    reminder_id = str(uuid.uuid4())
+    trigger_time = datetime.now() + timedelta(seconds=delay_seconds)
+    
+    active_reminders[reminder_id] = {
+        "task": task,
+        "status": "pending",
+        "trigger_time": trigger_time.isoformat()
+    }
+    
+    scheduler.add_job(
+        execute_reminder,
+        'date',
+        run_date=trigger_time,
+        args=[reminder_id, task],
+        id=reminder_id
+    )
+    return f"Reminder set successfully! ID: {reminder_id}"
+
+@tool
+def get_smart_home_state_tool() -> str:
+    """Get the current state of all smart home devices."""
+    return str(smart_home_devices)
+
+@tool
+def update_smart_home_state_tool(device_id: str, state: str) -> str:
+    """Update the state of a specific smart home device."""
+    if device_id not in smart_home_devices:
+        return f"Error: Device '{device_id}' not found. Available devices: {list(smart_home_devices.keys())}"
+        
+    smart_home_devices[device_id]["state"] = state
+    return f"Success: Device '{device_id}' state updated to '{state}'."
+
+agent_tools = [set_reminder_tool, get_smart_home_state_tool, update_smart_home_state_tool]
+agent_graph = create_agent_graph(agent_tools)
+
 @app.on_event("shutdown")
 def shutdown_event():
     scheduler.shutdown()
@@ -44,20 +94,19 @@ def shutdown_event():
 @app.post("/api/chat", response_model=ChatResponse)
 async def process_chat(request: ChatRequest):
     """
-    Process user queries. Currently uses a mock service.
-    Replace the mock logic below with an actual LLM integration (e.g., OpenAI, Anthropic).
+    Process user queries using the LangGraph agent.
     """
-    query = request.message.lower()
+    query = request.message
     
-    # Mock LLM Logic
-    if "hello" in query or "hi" in query:
-        reply = "Hello! I am your virtual assistant. How can I help you today?"
-    elif "weather" in query:
-        reply = "I cannot check live weather yet, but it's always a good idea to bring an umbrella!"
-    elif "joke" in query:
-        reply = "Why do programmers prefer dark mode? Because light attracts bugs!"
-    else:
-        reply = f"I understand you said: '{request.message}'. As a mock assistant, I don't have a specific answer for that yet."
+    try:
+        initial_state = {"messages": [HumanMessage(content=query)]}
+        result = agent_graph.invoke(initial_state)
+        
+        last_message = result["messages"][-1]
+        reply = last_message.content
+    except Exception as e:
+        logger.error(f"Error processing chat: {e}")
+        reply = "I encountered an error while processing your request. Please check your API key and try again."
         
     return ChatResponse(reply=reply)
 
